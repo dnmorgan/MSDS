@@ -1,0 +1,271 @@
+---
+title: "John Hopkins Covid-19 Data Project"
+author: "DM"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Load Data
+The data comes from John Hopkins from the COVID-19 pandemic and was archived on Mar 10, 2023.
+```{r load in data}
+library(tidyverse)
+library(lubridate)
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+
+file_names <-c("time_series_covid19_confirmed_global.csv",
+               "time_series_covid19_deaths_global.csv",
+               "time_series_covid19_confirmed_US.csv",
+               "time_series_covid19_deaths_US.csv")
+
+urls <- str_c(url_in, file_names)
+urls
+global_cases <- read_csv(urls[1])
+global_deaths <- read_csv(urls[2])
+US_cases <- read_csv(urls[3])
+US_deaths <- read_csv(urls[4])
+
+
+```
+
+## Cleaning and Transforming Data
+```{r clean data}
+#tidy data
+
+global_cases <- global_cases %>%
+  pivot_longer(cols = -c('Province/State','Country/Region', Lat, Long),
+               names_to = "date",
+               values_to = "cases") %>%
+  select(-c(Lat,Long))
+
+head(global_cases, n=10)
+
+
+global_deaths <- global_deaths %>%
+  pivot_longer(cols = -c('Province/State','Country/Region', Lat, Long),
+               names_to = "date",
+               values_to = "deaths") %>%
+  select(-c(Lat,Long))
+
+head(global_deaths, n=10)
+
+#transform data
+#combine the cases into deaths per date into one variable called global
+global <- global_cases %>%
+  full_join(global_deaths) %>%
+  rename(`Country_Region`='Country/Region',
+         Province_State = 'Province/State') %>% 
+  mutate(date = mdy(date))
+
+
+global <- global %>% filter(cases >0)
+summary(global)
+
+#double check amount of cases close to maximum
+global %>% filter(cases > 103000000)
+
+#now clean and wrangle US cases
+US_cases %>%
+  pivot_longer(cols = -(UID:Combined_Key),
+               names_to = "date",
+               values_to = "cases")
+
+US_cases <- US_cases %>%
+  pivot_longer(cols = -(UID:Combined_Key),
+                names_to = "date",
+                values_to = "cases") %>%
+  select(Admin2:cases) %>%
+  mutate(date=mdy(date)) %>%
+  select(-c(Lat,Long_))
+
+head(US_cases, n=10)
+
+US_deaths <- US_deaths %>%
+  pivot_longer(cols = -(UID:Population),
+               names_to = "date",
+               values_to = "deaths") %>%
+  select(Admin2:deaths) %>%
+  mutate(date=mdy(date)) %>%
+  select(-c(Lat,Long_))
+
+head(US_deaths, n=10)
+
+#join two US datasets together
+US <- US_cases %>%
+  full_join(US_deaths)
+
+#check join
+head(US, n=10)
+
+#add population data to global dataset 
+
+global <- global %>%
+  unite("Combined_Key",
+        c(Province_State, Country_Region),
+        sep=", ",
+        na.rm=TRUE,
+        remove=FALSE)
+
+head(global, n=10)
+
+#retrieve lookup table URL from John Hopkins Website
+
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+
+uid <- read_csv(uid_lookup_url) %>%
+  select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+
+#join uid onto global dataset
+
+global <- global %>% 
+  left_join(uid, by=c("Province_State","Country_Region")) %>%
+  select(-c(UID, FIPS)) %>%
+  select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+
+head(global, n=10)
+
+```
+In the data cleaning and transformation, we removed unnecessary columns for our analysis like latitude and longitude. We combined the cases into deaths per date into one variable called global. Combined_key puts together the county and the state for US cases.
+
+## Visualizing Data
+```{r visualizing data}
+#First, group US dataset by state, region, and date
+US_by_state <- US %>%
+  group_by(Province_State, Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths),
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths * 1000000 / Population) %>%
+  select(Province_State, Country_Region, date, cases, deaths, deaths_per_mill, Population) %>%
+  ungroup()
+
+head(US_by_state, n=10)
+
+#look at total for US, group by Country/Region and date
+
+US_totals <- US_by_state %>%
+  group_by(Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths),
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths * 1000000 / Population) %>%
+  select(Country_Region, date, cases, deaths, deaths_per_mill, Population) %>%
+  ungroup()
+
+head(US_totals, n=10)
+tail(US_totals, n=10)
+
+#plot US data
+
+US_totals %>%
+  filter(cases >0) %>%
+  ggplot(aes(x=date, y=cases)) + 
+  geom_line(aes(color="cases")) + 
+  geom_point(aes(color="cases")) + 
+  geom_line(aes(y=deaths, color="deaths")) + 
+  geom_point(aes(y=deaths, color="deaths")) + 
+  scale_y_log10() + 
+  theme(legend.position="bottom",
+        axis.text.x=element_text(angle=90)) + 
+  labs(title = "COVID-19 cases and deaths in US", y=NULL)
+
+
+#New Visualization 1: Cumulative Cases vs. Deaths (Scatter Plot with Log Scale)
+# This scatter plot will show the relationship between cumulative cases and cumulative deaths in the US. 
+# We'll use a log scale to visualize a wide range of values effectively.
+
+US_totals %>%
+  filter(cases > 0, deaths > 0) %>%
+  ggplot(aes(x = cases, y = deaths)) +
+  geom_point(alpha = 0.6, color = "blue") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(title = "Cumulative Cases vs. Deaths in the US",
+       x = "Cumulative Cases (Log Scale)",
+       y = "Cumulative Deaths (Log Scale)") +
+  theme_minimal()
+
+#New Visualization 2: Cases and Deaths Growth Rate (Bar Chart) 
+#This bar chart tracks the daily percentage growth rates of both cases and deaths, helping to highlight periods of rapid growth or slowdown.
+US_totals %>%
+  filter(cases > 0, deaths > 0) %>%
+  mutate(growth_rate_cases = (cases - lag(cases)) / lag(cases) * 100,
+         growth_rate_deaths = (deaths - lag(deaths)) / lag(deaths) * 100) %>%
+  replace_na(list(growth_rate_cases = 0, growth_rate_deaths = 0)) %>%
+  ggplot(aes(x = date)) +
+  geom_bar(aes(y = growth_rate_cases, fill = "Cases Growth Rate"), stat = "identity", alpha = 0.6) +
+  geom_bar(aes(y = growth_rate_deaths, fill = "Deaths Growth Rate"), stat = "identity", alpha = 0.6) +
+  coord_cartesian(ylim = c(0, 50)) +  # Adjust y-axis limits to zoom in
+  labs(title = "Daily Growth Rate of Cases and Deaths in the US",
+       y = "Growth Rate (%)",
+       fill = "") +
+  theme(axis.text.x = element_text(angle = 90),
+        legend.position = "bottom")
+```
+
+In the first plot of 'COVID-19 cases and deaths in the US', we see that cases and deaths follow similar trends with a large increase around March/April 2020 and continue to increase but somewhat level-out through the beginning of 2023. In the new visualization, Cumulative Cases vs Deaths in the US, it shows the relationship between cumulative cases and cumulative deaths in the US which seems to be a positive linear relationship. In the second new visualization, Daily Growth Rate of Cases and Deaths in the US, this bar chart tracks the daily percentage growth rates of both cases and deaths, helping to highlight periods of rapid growth or slowdown. We see large growth rates in the beginning of 2020 and a few other spikes in the beginning of 2021 and 2022.
+
+## Further Transformation and Analysis
+```{r transformation part 2}
+
+US_by_state <- US_by_state %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+
+US_totals <- US_totals %>%
+  mutate(new_cases = cases - lag(cases),
+         new_deaths = deaths - lag(deaths))
+
+#transform to group by state and deaths and cases per thousand
+US_state_totals <- US_by_state %>%
+  group_by(Province_State) %>%
+  summarize(deaths = max(deaths), cases = max(cases),
+            population = max(Population),
+            cases_per_thou = 1000 * cases / population,
+            deaths_per_thou = 1000 * deaths / population) %>%
+  filter(cases >0, population >0)
+
+#Lets look at the 10 states that had the least amount of deaths per thousand
+US_state_totals %>%
+  slice_min(deaths_per_thou, n=10) %>%
+  select(deaths_per_thou, cases_per_thou, everything())
+
+#Here are the 10 states that had the most amount of deaths per thousand
+US_state_totals %>%
+  slice_max(deaths_per_thou, n=10) %>%
+  select(deaths_per_thou, cases_per_thou, everything())
+
+```
+In this analysis, we wanted to look at which states had the most and least deaths per thousand residents. The state/territory with the least amount of deaths per thousand residents was American Samoa and the state territory with the most amount of deaths per thousand residents was Arizona. 
+
+## Modeling the Data
+```{r modeling}
+#Simple Linear Regression Model to predict deaths based on the number of cases in the US.
+
+# Filter data to only include rows where both cases and deaths are greater than 0
+US_lm_data <- US_totals %>%
+  filter(cases > 0, deaths > 0)
+
+# Fit a simple linear regression model
+model <- lm(deaths ~ cases, data = US_lm_data)
+
+# Summary of the model
+summary(model)
+
+# Visualize the regression model
+ggplot(US_lm_data, aes(x = cases, y = deaths)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Linear Regression: Deaths vs. Cases", x = "Cases", y = "Deaths")
+
+```
+
+The modeled data is a simple linear regression model to predict deaths based on the number of cases in the US. The data was filtered to only include rows where both cases and deaths are greater than 0. We see that based on the total data given between early 2020 and March 2023, the model is predicting an increase in deaths. There is a positive linear relationship between the amount of cases and deaths. We can also see from the summary output that the p-value for the predictor variable, cases, is significant (< 0.05).
+
+There could be many forms of bias in the sources and analyses. I think underreporting and testing Bias is a big one. Early in the pandemic, many countries, including the US, had limited access to testing. As a result, the number of confirmed cases may be an underestimate, particularly for mild or asymptomatic cases that were never tested. Another form of bias could be  regional and temporal biases. Each country or state may have different methodologies for counting COVID-19 cases and deaths. For example, some countries or states might only count deaths in hospitals, while others count all COVID-19-related deaths, including those that happen outside medical facilities. Another bias could be population and demographic bias. COVID-19 tends to affect older populations more severely. If a region has an older population, it might show higher death rates compared to regions with a younger population. Failing to account for demographic differences can lead to incorrect interpretations of the data. 
+Some forms of bias in the analysis could be with lagging and cumulative Data. When working with cumulative data, there's a risk of misinterpreting trends, especially if spikes or drops in data occur due to late reporting. It's important to handle smoothing or aggregation carefully to avoid overfitting or underestimating trends. Also incomplete or missing data can introduce bias, particularly if certain regions or time periods are underrepresented. For instance, smaller states or countries might have less frequent reporting, leading to artificial gaps or variability in the data
